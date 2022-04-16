@@ -1,0 +1,6 @@
+-e git+https://github.com/molguin92/EdgeDroid2@main#egg=edgedroid
+opencv-python
+numpy
+click
+black
+loguru
