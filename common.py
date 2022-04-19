@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
+import socket
 import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import numpy.typing as npt
@@ -10,6 +12,17 @@ import numpy.typing as npt
 HEADER_PACK_FMT = "!IIIII"  # [seq][height][width][channels][data length]
 HEADER_LEN = struct.calcsize(HEADER_PACK_FMT)
 IMG_BYTES_ORDER = "C"
+
+RESP_PACK_FMT = "!?"
+RESP_LEN = struct.calcsize(RESP_PACK_FMT)
+
+
+def bytes_to_numpy_image(
+    data: bytes, height: int, width: int, channels: int
+) -> npt.NDArray:
+    return np.frombuffer(data, dtype=np.uint8).reshape(
+        (height, width, channels), order=IMG_BYTES_ORDER
+    )
 
 
 @dataclass
@@ -41,8 +54,48 @@ class EdgeDroidFrame:
     def unpack(cls, data: bytes) -> EdgeDroidFrame:
         hdr = data[:HEADER_LEN]
         seq, height, width, channels, data_len = struct.unpack(HEADER_PACK_FMT, hdr)
-        image_data = np.frombuffer(
-            data, offset=HEADER_LEN, count=data_len, dtype=np.uint8
-        ).reshape((height, width, channels), order=IMG_BYTES_ORDER)
+        image_data = bytes_to_numpy_image(
+            data[HEADER_LEN : HEADER_LEN + data_len],
+            width=width,
+            height=height,
+            channels=channels,
+        )
 
         return cls(seq, image_data)
+
+
+def frame_stream_unpack(
+    stream_src: io.RawIOBase | socket.SocketType,
+) -> Iterator[EdgeDroidFrame]:
+    # TODO: does this need to be optimized somehow?
+    while True:
+        header = b""
+        while len(header) < HEADER_LEN:
+            header += stream_src.read(HEADER_LEN - len(header))
+
+        # got a complete header
+        seq, height, width, channels, data_len = struct.unpack(HEADER_PACK_FMT, header)
+
+        # read data
+        image_data = b""
+        while len(image_data) < data_len:
+            image_data += stream_src.read(data_len - len(image_data))
+
+        # got all the data!
+        image = bytes_to_numpy_image(image_data, height, width, channels)
+        yield EdgeDroidFrame(seq, image)
+
+
+def pack_response(resp: bool) -> bytes:
+    return struct.pack(RESP_PACK_FMT, resp)
+
+
+def response_stream_unpack(
+    stream_src: io.RawIOBase | socket.SocketType,
+) -> Iterator[bool]:
+    while True:
+        resp = b""
+        while len(resp) < RESP_LEN:
+            resp += stream_src.read(RESP_LEN - len(resp))
+
+        yield struct.unpack(RESP_PACK_FMT, resp)[0]  # unpack always returns tuples

@@ -1,3 +1,4 @@
+import contextlib
 import socket
 
 import click
@@ -12,22 +13,29 @@ from edgedroid.frames import FrameModel
 from edgedroid.model import EdgeDroidModel
 from loguru import logger
 
-from common import EdgeDroidFrame
+from common import EdgeDroidFrame, response_stream_unpack
 
 
 @click.command()
 @click.argument("host", type=str)
 @click.argument("port", type=int)
-@click.option("-n", "--neuroticism", type=click.FloatRange(0.0, 1.0), default=0.5)
-@click.option("-t", "--trace", type=str, default="square00")
-@click.option("-f", "--fade-distance", type=int, default=8)
+@click.option(
+    "-n",
+    "--neuroticism",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.5,
+    show_default=True,
+)
+@click.option("-t", "--trace", type=str, default="square00", show_default=True)
+@click.option("-f", "--fade-distance", type=int, default=8, show_default=True)
 @click.option(
     "-m",
     "--model",
     type=click.Choice(["empirical", "theoretical"], case_sensitive=False),
     default="theoretical",
+    show_default=True,
 )
-@click.option("--frame-timeout-seconds", type=float, default=5.0)
+@click.option("--frame-timeout-seconds", type=float, default=5.0, show_default=True)
 def run_client(
     host: str,
     port: int,
@@ -40,7 +48,7 @@ def run_client(
     # TODO: make asynchronous?
     logger.info(
         f"Initializing EdgeDroid model with neuroticism {neuroticism:0.2f} and fade "
-        f"distance {fade_distance:d} steps."
+        f"distance {fade_distance:d} steps"
     )
     logger.info(f"Model type: {model}")
     logger.info(f"Trace: {trace}")
@@ -70,14 +78,60 @@ def run_client(
     # "connect" to remote
     # this is of course just for convenience, to skip adding an address to every
     # send() call, as there are no "connections" in udp.
-    logger.info(f"Connecting to remote server at {host}:{port}/udp")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.connect((host, port))
-
-        for model_frame in edgedroid_model.play():
-            # package and send the frame
-            logger.debug(
-                f"Sending frame {model_frame.seq} (frame tag: {model_frame.frame_tag})."
+    logger.info(f"Connecting to remote server at {host}:{port}/tcp")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(30.0)  # TODO: magic number, maybe add as an option. This is
+        # just the timeout for the initial connection.
+        try:
+            sock.connect((host, port))
+        except socket.timeout:
+            logger.error(f"Timed out connecting to backend at {host}:{port}")
+            raise click.Abort()
+        except ConnectionRefusedError:
+            logger.error(f"{host}:{port} refused connection.")
+            raise click.Abort()
+        except socket.error as e:
+            logger.error(
+                f"Encountered unspecified socket error when connecting to {host}:{port}"
             )
-            payload = EdgeDroidFrame(model_frame.seq, model_frame.frame_data).pack()
-            sock.sendall(payload)
+            logger.exception(e)
+            raise click.Abort()
+
+        sock.settimeout(None)  # blocking mode
+        # these are tcp sockets, so no timeouts are needed
+
+        logger.warning("Starting emulation")
+        with contextlib.closing(response_stream_unpack(sock)) as resp_stream:
+            for model_frame in edgedroid_model.play():
+                # package and send the frame
+                logger.debug(
+                    f"Sending frame:\n"
+                    f"\tSeq: {model_frame.seq}\n"
+                    f"\tTag: {model_frame.frame_tag}\n"
+                    f"\tStep index: {model_frame.step_index}\n"
+                    f"\tFrame step seq: {model_frame.step_seq}"
+                )
+                payload = EdgeDroidFrame(model_frame.seq, model_frame.frame_data).pack()
+                sock.sendall(payload)
+
+                # wait for response
+                logger.debug("Waiting for response from server")
+                resp = next(resp_stream)
+                logger.debug("Received response from server")
+
+                if resp and model_frame.frame_tag == "success":
+                    # if we receive a response for a success frame, advance the model
+                    logger.debug("Advancing to next step")
+                    edgedroid_model.advance_step()
+                elif not resp:
+                    logger.error(
+                        "Received unexpected unsuccessful response from server, "
+                        "aborting"
+                    )
+                    raise click.Abort()
+
+        logger.warning("Emulation finished")
+
+
+if __name__ == "__main__":
+    run_client()
