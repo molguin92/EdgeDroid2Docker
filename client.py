@@ -1,5 +1,6 @@
 import contextlib
 import socket
+from typing import Literal
 
 import click
 from edgedroid import data as e_data
@@ -14,6 +15,81 @@ from edgedroid.model import EdgeDroidModel
 from loguru import logger
 
 from common import EdgeDroidFrame, response_stream_unpack
+
+
+class StreamSocketEmulation:
+    def __init__(
+        self,
+        neuroticism: float,
+        trace: str,
+        fade_distance: int,
+        model: Literal["theoretical", "empirical"] = "theoretical",
+    ):
+        logger.info(
+            f"Initializing EdgeDroid model with neuroticism {neuroticism:0.2f} and "
+            f"fade distance {fade_distance:d} steps"
+        )
+        logger.info(f"Model type: {model}")
+        logger.info(f"Trace: {trace}")
+
+        # should be able to use a single thread for everything
+
+        # first thing first, prepare data
+        data = preprocess_data(*e_data.load_default_exec_time_data())
+        frameset = e_data.load_default_trace(trace)
+
+        # prepare models
+        if model == "theoretical":
+            timing_model: ExecutionTimeModel = TheoreticalExecutionTimeModel(
+                data=data,
+                neuroticism=neuroticism,
+                transition_fade_distance=fade_distance,
+            )
+        else:
+            timing_model: ExecutionTimeModel = EmpiricalExecutionTimeModel(
+                data=data,
+                neuroticism=neuroticism,
+                transition_fade_distance=fade_distance,
+            )
+
+        frame_model = FrameModel(e_data.load_default_frame_probabilities())
+
+        self._model = EdgeDroidModel(
+            frame_trace=frameset, frame_model=frame_model, timing_model=timing_model
+        )
+
+    def emulate(self, sock: socket.SocketType) -> None:
+        logger.warning("Starting emulation")
+        with contextlib.closing(response_stream_unpack(sock)) as resp_stream:
+            for model_frame in self._model.play():
+                # package and send the frame
+                logger.debug(
+                    f"Sending frame:\n"
+                    f"\tSeq: {model_frame.seq}\n"
+                    f"\tTag: {model_frame.frame_tag}\n"
+                    f"\tStep index: {model_frame.step_index}\n"
+                    f"\tFrame step seq: {model_frame.step_seq}"
+                )
+                payload = EdgeDroidFrame(model_frame.seq, model_frame.frame_data).pack()
+                sock.sendall(payload)
+
+                # wait for response
+                logger.debug("Waiting for response from server")
+                resp = next(resp_stream)
+                logger.debug("Received response from server")
+
+                if resp and model_frame.frame_tag == "success":
+                    # if we receive a response for a success frame, advance the model
+                    logger.debug("Advancing to next step")
+                    self._model.advance_step()
+                elif not resp:
+                    logger.error(
+                        "Received unexpected unsuccessful response from server, "
+                        "aborting"
+                    )
+                    raise click.Abort()
+
+        logger.warning("Emulation finished")
 
 
 @click.command()
@@ -42,37 +118,10 @@ def run_client(
     neuroticism: float,
     trace: str,
     fade_distance: int,
-    model: str,
-    frame_timeout_seconds: float,
+    model: Literal["empirical", "theoretical"],
 ):
-    # TODO: make asynchronous?
-    logger.info(
-        f"Initializing EdgeDroid model with neuroticism {neuroticism:0.2f} and fade "
-        f"distance {fade_distance:d} steps"
-    )
-    logger.info(f"Model type: {model}")
-    logger.info(f"Trace: {trace}")
-
-    # should be able to use a single thread for everything
-
-    # first thing first, prepare data
-    data = preprocess_data(*e_data.load_default_exec_time_data())
-    frameset = e_data.load_default_trace(trace)
-
-    # prepare models
-    if model == "theoretical":
-        timing_model: ExecutionTimeModel = TheoreticalExecutionTimeModel(
-            data=data, neuroticism=neuroticism, transition_fade_distance=fade_distance
-        )
-    else:
-        timing_model: ExecutionTimeModel = EmpiricalExecutionTimeModel(
-            data=data, neuroticism=neuroticism, transition_fade_distance=fade_distance
-        )
-
-    frame_model = FrameModel(e_data.load_default_frame_probabilities())
-
-    edgedroid_model = EdgeDroidModel(
-        frame_trace=frameset, frame_model=frame_model, timing_model=timing_model
+    emulation = StreamSocketEmulation(
+        neuroticism=neuroticism, trace=trace, fade_distance=fade_distance, model=model
     )
 
     # "connect" to remote
@@ -100,37 +149,7 @@ def run_client(
         sock.settimeout(None)  # blocking mode
         # these are tcp sockets, so no timeouts are needed
 
-        logger.warning("Starting emulation")
-        with contextlib.closing(response_stream_unpack(sock)) as resp_stream:
-            for model_frame in edgedroid_model.play():
-                # package and send the frame
-                logger.debug(
-                    f"Sending frame:\n"
-                    f"\tSeq: {model_frame.seq}\n"
-                    f"\tTag: {model_frame.frame_tag}\n"
-                    f"\tStep index: {model_frame.step_index}\n"
-                    f"\tFrame step seq: {model_frame.step_seq}"
-                )
-                payload = EdgeDroidFrame(model_frame.seq, model_frame.frame_data).pack()
-                sock.sendall(payload)
-
-                # wait for response
-                logger.debug("Waiting for response from server")
-                resp = next(resp_stream)
-                logger.debug("Received response from server")
-
-                if resp and model_frame.frame_tag == "success":
-                    # if we receive a response for a success frame, advance the model
-                    logger.debug("Advancing to next step")
-                    edgedroid_model.advance_step()
-                elif not resp:
-                    logger.error(
-                        "Received unexpected unsuccessful response from server, "
-                        "aborting"
-                    )
-                    raise click.Abort()
-
-        logger.warning("Emulation finished")
+        emulation.emulate(sock)
 
 
 if __name__ == "__main__":

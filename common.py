@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import socket
 import struct
 from dataclasses import dataclass
@@ -8,6 +7,7 @@ from typing import Any, Iterator
 
 import numpy as np
 import numpy.typing as npt
+from loguru import logger
 
 HEADER_PACK_FMT = "!IIIII"  # [seq][height][width][channels][data length]
 HEADER_LEN = struct.calcsize(HEADER_PACK_FMT)
@@ -65,25 +65,31 @@ class EdgeDroidFrame:
 
 
 def frame_stream_unpack(
-    stream_src: io.RawIOBase | socket.SocketType,
+    sock: socket.SocketType,
 ) -> Iterator[EdgeDroidFrame]:
     # TODO: does this need to be optimized somehow?
-    while True:
-        header = b""
-        while len(header) < HEADER_LEN:
-            header += stream_src.read(HEADER_LEN - len(header))
+    logger.info("Started frame stream unpacker")
+    try:
+        while True:
+            header = b""
+            while len(header) < HEADER_LEN:
+                header += sock.recv(HEADER_LEN - len(header))
 
-        # got a complete header
-        seq, height, width, channels, data_len = struct.unpack(HEADER_PACK_FMT, header)
+            # got a complete header
+            seq, height, width, channels, data_len = struct.unpack(
+                HEADER_PACK_FMT, header
+            )
 
-        # read data
-        image_data = b""
-        while len(image_data) < data_len:
-            image_data += stream_src.read(data_len - len(image_data))
+            # read data
+            image_data = b""
+            while len(image_data) < data_len:
+                image_data += sock.recv(data_len - len(image_data))
 
-        # got all the data!
-        image = bytes_to_numpy_image(image_data, height, width, channels)
-        yield EdgeDroidFrame(seq, image)
+            # got all the data!
+            image = bytes_to_numpy_image(image_data, height, width, channels)
+            yield EdgeDroidFrame(seq, image)
+    finally:
+        logger.debug("Closing frame stream unpacker")
 
 
 def pack_response(resp: bool) -> bytes:
@@ -91,11 +97,11 @@ def pack_response(resp: bool) -> bytes:
 
 
 def response_stream_unpack(
-    stream_src: io.RawIOBase | socket.SocketType,
+    stream_src: socket.SocketType,
 ) -> Iterator[bool]:
     while True:
         resp = b""
         while len(resp) < RESP_LEN:
-            resp += stream_src.read(RESP_LEN - len(resp))
+            resp += stream_src.recv(RESP_LEN - len(resp))
 
         yield struct.unpack(RESP_PACK_FMT, resp)[0]  # unpack always returns tuples
