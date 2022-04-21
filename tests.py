@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import queue
 import socket
+import sys
 import unittest
 from functools import wraps
 from threading import Event, Thread
@@ -172,6 +173,9 @@ class DummyServer(contextlib.AbstractContextManager, Thread):
 
 class TestEmulation(unittest.TestCase):
     def test_emulation_loop(self) -> None:
+        logger.remove()
+        logger.add(sys.stderr, level="INFO", colorize=True)
+
         emulation = StreamSocketEmulation(
             neuroticism=0.5, trace="square00", fade_distance=4, model="empirical"
         )
