@@ -12,6 +12,7 @@ from edgedroid.data import load_default_trace
 from loguru import logger
 
 import common
+from client import StreamSocketEmulation
 
 
 def log_test(fn: Callable) -> Callable:
@@ -127,33 +128,59 @@ class TestCommon(unittest.TestCase):
                 self.assertEqual(resp, next(stream))
 
 
-# class TestEmulation(unittest.TestCase):
-#     def test_emulation_loop(self) -> None:
-#         emulation = StreamSocketEmulation(
-#             neuroticism=0.5, trace="square00", fade_distance=4, model="empirical"
-#         )
-#
-#         sock_client, sock_server = socket.socketpair(socket.AF_UNIX,
-#         socket.SOCK_STREAM)
-#
-#         def server_loop():
-#             sock_server.settimeout(0.250)
-#             with contextlib.closing(
-#                 common.frame_stream_unpack(sock_server)
-#             ) as unpacker:
-#                 try:
-#                     for _ in unpacker:
-#                         sock_server.sendall(common.pack_response(True))
-#                 except (socket.error, socket.timeout):
-#                     return
-#
-#         server = Thread(target=server_loop)
-#         server.start()
-#
-#         emulation.emulate(sock_client)
-#         sock_client.close()
-#         sock_server.close()
-#         server.join()
+class DummyServer(contextlib.AbstractContextManager, Thread):
+    """
+    Simply sends back "true" to each received frame.
+    """
+
+    def __init__(self, sock: socket.SocketType) -> None:
+        super(DummyServer, self).__init__()
+        self._socket = sock
+        self._running = Event()
+
+    def start(self) -> None:
+        logger.info("Starting dummy server")
+        self._running.set()
+        super(DummyServer, self).start()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        logger.info("Stopping dummy server")
+        self._running.clear()
+        super(DummyServer, self).join(timeout)
+
+    def __enter__(self) -> DummyServer:
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.join()
+        super(DummyServer, self).__exit__(exc_type, exc_val, exc_tb)
+
+    def run(self) -> None:
+        while self._running.is_set():
+            try:
+                with contextlib.closing(
+                    common.frame_stream_unpack(self._socket)
+                ) as stream:
+                    for _ in stream:
+                        self._socket.sendall(common.pack_response(True))
+            except socket.timeout:
+                pass
+            finally:
+                self._running.clear()
+
+
+class TestEmulation(unittest.TestCase):
+    def test_emulation_loop(self) -> None:
+        emulation = StreamSocketEmulation(
+            neuroticism=0.5, trace="square00", fade_distance=4, model="empirical"
+        )
+
+        with contextlib.ExitStack() as stack:
+            csock, ssock = stack.enter_context(client_server_sockets(timeout=0.250))
+            stack.enter_context(DummyServer(ssock))
+
+            emulation.emulate(csock)
 
 
 if __name__ == "__main__":

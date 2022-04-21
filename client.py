@@ -78,7 +78,7 @@ class StreamSocketEmulation:
                 resp = next(resp_stream)
                 logger.debug("Received response from server")
 
-                if resp and model_frame.frame_tag == "success":
+                if resp and model_frame.frame_tag in ("success", "initial"):
                     # if we receive a response for a success frame, advance the model
                     logger.debug("Advancing to next step")
                     self._model.advance_step()
